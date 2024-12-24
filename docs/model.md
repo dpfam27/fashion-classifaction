@@ -1,4 +1,5 @@
 # Model Architecture
+ Chi tiết cấu trúc Mô hình
 
 ## CNN Architecture
 - Input: 224x224x3 RGB image

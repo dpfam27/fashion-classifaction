@@ -1,6 +1,7 @@
 # fashion-classifaction
  Fashion image classification using deep learning
 ## Fashion Classification Project
+ Tổng quan dự án và setup nhanh
 
 AI-powered system that:
 1. Detects clothes in images
