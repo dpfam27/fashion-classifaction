@@ -25,73 +25,128 @@ class SheinScraper:
         ]:
             os.makedirs(dir, exist_ok=True)
         
-        # Setup webdriver
-        self.driver = webdriver.Chrome()
-        self.base_url = "https://s1.shein.com/vn"
+        # Enhanced configuration
+        self.categories = {
+            'dresses': '/category/Dresses-sc-00100089.html',
+            'tops': '/category/Tops-sc-00101974.html',
+            'bottoms': '/category/Bottoms-sc-00089121.html'
+        }
         
-        # Categories to scrape
-        self.categories = [
-            'dresses',
-            'tops',
-            'bottoms'
-        ]
+        # Setup webdriver with options for better performance
+        options = webdriver.ChromeOptions()
+        options.add_argument('--disable-gpu')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-notifications')
+        self.driver = webdriver.Chrome(options=options)
+        self.base_url = "https://us.shein.com"  # Changed to US site for better stability
         
-    def scrape_category(self, category, count=500):
-        url = f"{self.base_url}/category/{category}"
+        # Add retry configuration
+        self.max_retries = 3
+        self.retry_delay = 5
+        
+    def scrape_category(self, category, target_count=1000):
+        """Scrape products from a category with improved error handling and progress tracking"""
+        url = f"{self.base_url}{self.categories[category]}"
         products = []
+        page = 1
         
         try:
-            self.driver.get(url)
-            
-            while len(products) < count:
-                # Wait for products to load
-                WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_all_elements_located(
-                        (By.CLASS_NAME, 'S-product-item')
+            while len(products) < target_count:
+                paginated_url = f"{url}?page={page}"
+                self.driver.get(paginated_url)
+                
+                # Wait for products with explicit timeout
+                try:
+                    WebDriverWait(self.driver, 15).until(
+                        EC.presence_of_all_elements_located(
+                            (By.CLASS_NAME, 'S-product-item')
+                        )
                     )
-                )
-                
-                # Find all products
-                items = self.driver.find_elements(
-                    By.CLASS_NAME, 'S-product-item'
-                )
-                
-                for item in items:
-                    if len(products) >= count:
+                except Exception as e:
+                    print(f"Timeout waiting for products on page {page}: {e}")
+                    if page > 1:  # If not first page, might be end of products
                         break
-                        
-                    try:
-                        product = {
-                            'title': item.find_element(
-                                By.CLASS_NAME, 'S-product-item__name'
-                            ).text,
-                            'price': item.find_element(
-                                By.CLASS_NAME, 'S-product-item__price'
-                            ).text,
-                            'image_url': item.find_element(
-                                By.TAG_NAME, 'img'
-                            ).get_attribute('src'),
-                            'product_url': item.find_element(
-                                By.TAG_NAME, 'a'
-                            ).get_attribute('href'),
-                            'category': category
-                        }
-                        products.append(product)
-                        
-                    except Exception as e:
-                        print(f"Error extracting product: {e}")
-                        continue
+                    continue
                 
-                # Scroll for more products
-                self.driver.execute_script(
-                    "window.scrollTo(0, document.body.scrollHeight);"
-                )
-                time.sleep(2)
+                # Find all products with retry mechanism
+                for attempt in range(self.max_retries):
+                    try:
+                        items = self.driver.find_elements(
+                            By.CLASS_NAME, 'S-product-item'
+                        )
+                        break
+                    except Exception as e:
+                        if attempt == self.max_retries - 1:
+                            print(f"Failed to find products after {self.max_retries} attempts")
+                            raise e
+                        time.sleep(self.retry_delay)
+                
+                new_products = self._extract_products(items, category, target_count - len(products))
+                products.extend(new_products)
+                
+                print(f"Category {category}: {len(products)}/{target_count} products scraped")
+                
+                if not new_products:  # No new products found
+                    break
+                    
+                page += 1
+                # Random delay between pages to avoid detection
+                time.sleep(random.uniform(2, 4))
                 
         except Exception as e:
             print(f"Error scraping category {category}: {e}")
             
         return products
+    
+    def _extract_products(self, items, category, remaining_count):
+        """Extract product information with improved error handling"""
+        products = []
+        
+        for item in items[:remaining_count]:
+            try:
+                # Wait for specific elements
+                WebDriverWait(item, 5).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, 'S-product-item__name'))
+                )
+                
+                product = {
+                    'title': item.find_element(By.CLASS_NAME, 'S-product-item__name').text.strip(),
+                    'price': item.find_element(By.CLASS_NAME, 'S-product-item__price').text.strip(),
+                    'image_url': item.find_element(By.TAG_NAME, 'img').get_attribute('src'),
+                    'product_url': item.find_element(By.TAG_NAME, 'a').get_attribute('href'),
+                    'category': category,
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                
+                # Validate product data
+                if all(product.values()):
+                    products.append(product)
+                
+            except Exception as e:
+                print(f"Error extracting product: {e}")
+                continue
+                
+        return products
+    
+    def _download_image(self, url, path):
+        """Download image with retry mechanism"""
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    with open(path, 'wb') as f:
+                        f.write(response.content)
+                    return True
+                elif attempt == self.max_retries - 1:
+                    print(f"Failed to download image after {self.max_retries} attempts: {url}")
+                    return False
+            except Exception as e:
+                if attempt == self.max_retries - 1:
+                    print(f"Error downloading image {url}: {e}")
+                    return False
+            time.sleep(self.retry_delay)
+        return False
     
     def save_data(self, products):
         """Split data into train/test and save"""
@@ -122,32 +177,28 @@ class SheinScraper:
         df = pd.DataFrame(products)
         df.to_csv(os.path.join(dir_path, f'{subset}.csv'), index=False)
         
-    def _download_image(self, url, path):
-        """Download image from URL"""
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                with open(path, 'wb') as f:
-                    f.write(response.content)
-                return True
-        except Exception as e:
-            print(f"Error downloading image {url}: {e}")
-        return False
-    
     def run(self):
-        """Run complete scraping process"""
+        """Run complete scraping process with progress tracking"""
         all_products = []
         
         for category in self.categories:
-            print(f"Scraping category: {category}")
-            products = self.scrape_category(category)
+            print(f"\nStarting to scrape category: {category}")
+            products = self.scrape_category(category, target_count=1000)
             all_products.extend(products)
-            time.sleep(2)  # Delay between categories
             
-        print(f"Total products scraped: {len(all_products)}")
+            print(f"Completed {category}: {len(products)} products scraped")
+            time.sleep(random.uniform(3, 5))  # Random delay between categories
+            
+        print(f"\nTotal products scraped: {len(all_products)}")
+        print("Saving data...")
         self.save_data(all_products)
         self.driver.quit()
 
 if __name__ == "__main__":
     scraper = SheinScraper()
-    scraper.run()
+    try:
+        scraper.run()
+    except Exception as e:
+        print(f"Scraping failed: {e}")
+    finally:
+        scraper.driver.quit()
